@@ -4,39 +4,12 @@ use crc::crc32::{self, Hasher32};
 use docopt::Docopt;
 use error_chain::{bail, quick_main};
 use errors::Result;
-use flate2::{bufread::ZlibEncoder, Compression};
+use flate2::{write::ZlibEncoder, Compression};
 use pbr::ProgressBar;
 use serde::Deserialize;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
-
-/// A BufRead implementation which just yields a set number of zeroes.
-pub struct ZeroReader {
-    pub count: usize,
-    pub at: usize,
-}
-
-impl ZeroReader {
-    pub fn new(count: usize) -> Self {
-        Self { count, at: 0 }
-    }
-}
-
-impl Read for ZeroReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut num = 0;
-        for c in buf.iter_mut() {
-            if self.at == self.count {
-                break;
-            }
-            *c = 0;
-            num += 1;
-            self.at += 1;
-        }
-        Ok(num)
-    }
-}
 
 pub struct ChunkWriter<W: io::Write + io::Seek> {
     w: W,
@@ -148,32 +121,34 @@ fn render<W: io::Write + io::Seek>(
     out = write_chunk(out, png::chunk::IHDR, &hdr)?;
     println!("done!");
 
+    // Write it to an IDAT chunk.
+    let idat = ChunkWriter::begin(out, png::chunk::IDAT, None)?;
+    let mut w = ZlibEncoder::new(idat, Compression::new(9));
+
     // PNG bitmap data is grouped in "scanlines", eg. data for one horizontal line, prefixed with
     // a 1-byte filter mode flag. We're using no filters (0) and all-black (0) pixels, we just want
     // to generate a whole pile of deflated zeroes, but without allocating it all upfront.
     let ibytes = info.raw_row_length() * height;
-    let idata = ZeroReader::new(ibytes);
-    let mut zdata = ZlibEncoder::new(
-        io::BufReader::with_capacity(64 * 1024, idata),
-        Compression::new(4),
-    );
 
-    // Write it to an IDAT chunk.
     let mut pb = ProgressBar::new(ibytes as u64);
     pb.set_units(pbr::Units::Bytes);
     pb.message("IDAT: ");
-    let mut idat = ChunkWriter::begin(out, png::chunk::IDAT, None)?;
-    let mut buf = [0; 2 * 1024 * 1024];
+
+    let mut at = 0;
+    let buf = [0; 2 * 1024 * 1024];
     loop {
-        let len = zdata.read(&mut buf[..])?;
-        if len == 0 {
+        let mut len = ibytes - at;
+        if len > buf.len() {
+            len = buf.len()
+        }
+        if len <= 0 {
             break;
         }
-        idat.write_all(&buf[..len])?;
-        pb.add(len as u64);
+        at += w.write(&buf[..len])?;
+        pb.set(at as u64);
     }
     pb.finish();
-    out = idat.finish()?;
+    out = w.finish()?.finish()?;
 
     // Write the IEND chunk.
     print!("IEND: ");
