@@ -1,15 +1,42 @@
 pub mod errors;
 
 use crc::crc32::{self, Hasher32};
-use deflate::write::ZlibEncoder;
 use docopt::Docopt;
 use error_chain::{bail, quick_main};
 use errors::Result;
+use flate2::{bufread::ZlibEncoder, Compression};
 use pbr::ProgressBar;
 use serde::Deserialize;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
+
+/// A BufRead implementation which just yields a set number of zeroes.
+pub struct ZeroReader {
+    pub count: usize,
+    pub at: usize,
+}
+
+impl ZeroReader {
+    pub fn new(count: usize) -> Self {
+        Self { count, at: 0 }
+    }
+}
+
+impl Read for ZeroReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut num = 0;
+        for c in buf.iter_mut() {
+            if self.at == self.count {
+                break;
+            }
+            *c = 0;
+            num += 1;
+            self.at += 1;
+        }
+        Ok(num)
+    }
+}
 
 pub struct ChunkWriter<W: io::Write + io::Seek> {
     w: W,
@@ -96,7 +123,7 @@ fn render<W: io::Write + io::Seek>(
         pixel_dims: None,
         frame_control: None,
         animation_control: None,
-        compression: png::Compression::Rle,
+        compression: png::Compression::Best,
         filter: png::FilterType::NoFilter,
     };
     //let in_len = info.raw_row_length() - 1;
@@ -121,28 +148,32 @@ fn render<W: io::Write + io::Seek>(
     out = write_chunk(out, png::chunk::IHDR, &hdr)?;
     println!("done!");
 
-    // Generate an IDAT chunk!
-    let mut pb = ProgressBar::new(height as u64);
-    pb.message("IDAT: ");
+    // PNG bitmap data is grouped in "scanlines", eg. data for one horizontal line, prefixed with
+    // a 1-byte filter mode flag. We're using no filters (0) and all-black (0) pixels, we just want
+    // to generate a whole pile of deflated zeroes, but without allocating it all upfront.
+    let ibytes = info.raw_row_length() * height;
+    let idata = ZeroReader::new(ibytes);
+    let mut zdata = ZlibEncoder::new(
+        io::BufReader::with_capacity(64 * 1024, idata),
+        Compression::new(4),
+    );
 
-    let idat = ChunkWriter::begin(out, png::chunk::IDAT, None)?;
-    let zw = ZlibEncoder::new(idat, info.compression.clone());
-    let mut w = io::BufWriter::new(zw);
-    for row in 0..height {
-        w.write_all(&[0x00])?; // Filter method.
-        for _ in 0..info.raw_row_length() - 1 {
-            w.write_all(&[0x00])?;
+    // Write it to an IDAT chunk.
+    let mut pb = ProgressBar::new(ibytes as u64);
+    pb.set_units(pbr::Units::Bytes);
+    pb.message("IDAT: ");
+    let mut idat = ChunkWriter::begin(out, png::chunk::IDAT, None)?;
+    let mut buf = [0; 2 * 1024 * 1024];
+    loop {
+        let len = zdata.read(&mut buf[..])?;
+        if len == 0 {
+            break;
         }
-        if row % 100 == 0 {
-            pb.set(row as u64);
-        }
+        idat.write_all(&buf[..len])?;
+        pb.add(len as u64);
     }
-    out = w
-        .into_inner()
-        .map_err(|e| -> errors::Error { format!("{}", e).into() })?
-        .finish()?
-        .finish()?;
     pb.finish();
+    out = idat.finish()?;
 
     // Write the IEND chunk.
     print!("IEND: ");
