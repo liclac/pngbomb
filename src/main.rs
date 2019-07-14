@@ -2,14 +2,14 @@ pub mod errors;
 
 use crc::crc32::{self, Hasher32};
 use deflate::write::ZlibEncoder;
+use docopt::Docopt;
 use error_chain::{bail, quick_main};
 use errors::Result;
 use pbr::ProgressBar;
+use serde::Deserialize;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
-use docopt::Docopt;
-use serde::Deserialize;
 
 pub struct ChunkWriter<W: io::Write + io::Seek> {
     w: W,
@@ -124,6 +124,7 @@ fn render<W: io::Write + io::Seek>(
     // Generate an IDAT chunk!
     let mut pb = ProgressBar::new(height as u64);
     pb.message("IDAT: ");
+
     let idat = ChunkWriter::begin(out, png::chunk::IDAT, None)?;
     let zw = ZlibEncoder::new(idat, info.compression.clone());
     let mut w = io::BufWriter::new(zw);
@@ -132,8 +133,9 @@ fn render<W: io::Write + io::Seek>(
         for _ in 0..info.raw_row_length() - 1 {
             w.write_all(&[0x00])?;
         }
-        w.flush()?;
-        pb.set(row as u64);
+        if row % 100 == 0 {
+            pb.set(row as u64);
+        }
     }
     out = w
         .into_inner()
