@@ -8,6 +8,8 @@ use pbr::ProgressBar;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
+use docopt::Docopt;
+use serde::Deserialize;
 
 pub struct ChunkWriter<W: io::Write + io::Seek> {
     w: W,
@@ -148,11 +150,29 @@ fn render<W: io::Write + io::Seek>(
     Ok(out)
 }
 
+const USAGE: &str = "
+pngbomb - generate a very big PNG
+
+Usage: pngbomb [options] <outfile>
+
+Options:
+  -w PX --width=PX   Output width [default: 10000]
+  -h PX --height=PX  Output height [default: 10000]
+";
+
+#[derive(Deserialize)]
+struct Args {
+    arg_outfile: String,
+    flag_width: usize,
+    flag_height: usize,
+}
+
 fn run() -> Result<()> {
+    let args: Args = Docopt::new(USAGE)?.deserialize()?;
     render(
-        &mut File::create("out.png")?,
-        10000,
-        10000,
+        &mut File::create(args.arg_outfile)?,
+        args.flag_width,
+        args.flag_height,
         png::ColorType::Grayscale,
         png::BitDepth::One,
     )?;
